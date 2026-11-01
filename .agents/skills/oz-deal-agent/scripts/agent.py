@@ -170,7 +170,12 @@ def analyse(c,a):
             if isinstance(value,bool) or not isinstance(value,(int,float)) or not 0<=value<=10000000 or not str(evidence).strip(): raise ValueError('Known benefit requires a non-negative amount and evidence')
         elif value is not None: raise ValueError('Unknown or irrelevant benefits must be null')
         if days is not None and (isinstance(days,bool) or not isinstance(days,(int,float)) or not 0<=days<=36500): raise ValueError('Invalid task_days')
-        result={'categories':list(dict.fromkeys(cats)),'status':status,'benefit_aud':value,'benefit_note':str(x.get('benefit_note','')),'task_days':days,'task_note':str(x.get('task_note','')),'payout_note':str(x.get('payout_note','')),'conditions':str(x.get('conditions','')),'evidence':str(evidence)}
+        verification=x.get('verification') or {'status':'unverified'}
+        if not isinstance(verification,dict) or verification.get('status') not in ('active','expired','unverified'): raise ValueError('Invalid verification status')
+        url=verification.get('official_url','')
+        if verification['status'] in ('active','expired') and (not re.match(r'^https?://[^/\s]+',str(url)) or not str(verification.get('evidence','')).strip()): raise ValueError('Official verification requires URL and evidence')
+        verified={'status':verification['status'],'official_url':str(url),'evidence':str(verification.get('evidence','')),'checked_at':iso() if verification['status'] in ('active','expired') else None}
+        result={'categories':list(dict.fromkeys(cats)),'status':status,'benefit_aud':value,'benefit_note':str(x.get('benefit_note','')),'task_days':days,'task_note':str(x.get('task_note','')),'payout_note':str(x.get('payout_note','')),'conditions':str(x.get('conditions','')),'evidence':str(evidence),'verification':verified}
         cur=c.execute('UPDATE deals SET analysis=? WHERE id=?',(json.dumps(result,ensure_ascii=False),id)); changed+=cur.rowcount
         if not cur.rowcount: raise ValueError('Unknown deal id '+id)
     c.commit(); emit({'updated':changed})
@@ -191,7 +196,7 @@ def report(c,a):
             try:
                 if datetime.fromisoformat(expiry).timestamp() < now().timestamp(): continue
             except ValueError: pass
-        if x['status']=='irrelevant': continue
+        if x['status']=='irrelevant' or x.get('verification',{}).get('status')=='expired': continue
         selected=bool(set(x['categories']) & set(p['categories']))
         cross=p['global_minimum_aud']
         if not selected and cross is None: continue
@@ -200,12 +205,13 @@ def report(c,a):
         override = cross is not None and x['benefit_aud'] is not None and x['benefit_aud'] >= cross
         if not override and p['max_task_days'] is not None and x['task_days'] is not None and x['task_days'] > p['max_task_days']: continue
         reasons=[]
+        if x.get('verification',{}).get('status')!='active': reasons.append('official offer not verified')
         if x['status']=='unknown': reasons.append('benefit unknown')
         if not override and p['max_task_days'] is not None and x['task_days'] is None: reasons.append('task duration unknown')
         if override: d['high_value_override']=True
         if reasons: d['uncertain_reasons']=reasons; uncertain.append(d)
         else: matches.append(d)
-    emit({'profile':p,'matches':matches,'needs_review':uncertain,'note':'Unknown benefits or task durations are not qualifying matches. Validate conditions before acting.'})
+    emit({'profile':p,'matches':matches,'needs_review':uncertain,'note':'Unverified offers and unknown benefits or task durations are not qualifying matches. Recheck current conditions before acting.'})
 
 def mark_delivered(c,a):
     ids=list(dict.fromkeys(a.ids))
