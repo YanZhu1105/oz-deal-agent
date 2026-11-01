@@ -4,7 +4,7 @@ Grok Bot uses native cloud skills and routines. This adapter is a prompt, not an
 
 1. Create a private Bot and send the text in [PROMPT.md](PROMPT.md). Complete its five onboarding questions.
 2. Ask the Bot to save the method as a skill and test it once before scheduling.
-3. Ask it to create a routine at the chosen cadence and local time. Inspect the saved schedule and use **Test** if available. Enable its app notifications separately if desired.
+3. After you choose a frequency, the Bot should discover its scheduling capability and try to create the routine itself. Check the saved schedule and use **Test** if available. If it cannot create a routine, it must say so and tell you to return to the conversation for a manual check. Enable its app notifications separately if desired.
 4. Before relying on deduplication or feedback, verify that the Bot can store and read a durable, private list of prior deal IDs, preferences and feedback across independent routine runs. If it cannot, it must disclose that and should not claim reliable deduplication. Do not upload bank credentials or identity documents.
 
 A Grok Bot routine runs in the cloud, so it does not need your computer on, but schedules, tool access, account availability, notifications and usage are controlled by Grok Bot. A routine that fetches RSS only at digest time may miss posts; a separate collector and durable store are needed for frequent collection, and no such cloud integration is provided here. Do not use one user's state for another user. See the official [skills and routines guide](https://docs.x.ai/grok-bot/skills-routines-and-automations).

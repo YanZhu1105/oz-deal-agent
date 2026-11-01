@@ -47,7 +47,7 @@ The skill uses the [Agent Skills](https://agentskills.io/) format. Claude Code p
 
 ## Scheduling and notifications
 
-After onboarding, the agent should set up **both** an RSS collector and an AI digest schedule at your chosen frequency, time and timezone when the host supports them, and report which steps succeeded. It should not claim automatic push is enabled until the actual scheduled task exists. AI runs consume your host's usage allowance. The macOS collector itself does not call AI.
+After you answer the final question about frequency, the agent should discover the current host’s capabilities and attempt to set up both an RSS collector and an AI digest schedule. It should report what actually succeeded, without requiring you to select an implementation. If scheduling is not available or fails, it should clearly say so and invite you to return to the conversation for a manual check. It must not claim automatic push is enabled until the actual scheduled task exists. AI runs consume your host's usage allowance. The macOS collector itself does not call AI.
 
 For Codex Desktop, the agent can use its scheduled-task capability if available. Claude Desktop supports persistent local scheduled tasks, while Claude Code `/loop` is session-scoped; a cloud task cannot access your local SQLite database. Grok Bot uses cloud routines and needs a separately verified durable private store. See [Claude scheduling](https://code.claude.com/docs/en/scheduled-tasks) and [Grok routines](https://docs.x.ai/grok-bot/skills-routines-and-automations).
 
