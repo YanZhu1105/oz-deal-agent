@@ -9,7 +9,7 @@ from pathlib import Path
 DATA = Path(os.environ.get('OZ_DEAL_DATA', str(Path.home() / '.local/share/oz-deal-agent'))).expanduser()
 FEED = 'https://www.ozbargain.com.au/deals/feed'
 HEADERS = {'User-Agent':'OzDealAgent/0.1 (personal RSS reader)', 'Accept':'application/rss+xml, text/html'}
-CATEGORIES = ['Banking','Cashback','Credit cards','Freebies','Groceries','Shopping','Technology','Travel','Food','Other']
+CATEGORIES = ['Banking & finance','Credit cards & points','Cashback','Gift cards','Freebies','Groceries & essentials','Dining & takeaway','Mobile & internet','Computers & electronics','Gaming & entertainment','Home & garden','Fashion & beauty','Travel & transport','Automotive','Sports & outdoors','Kids & pets','Other']
 
 class Text(HTMLParser):
     def __init__(self): super().__init__(); self.skip=0; self.parts=[]
@@ -36,9 +36,18 @@ def connect():
     c=sqlite3.connect(str(DATA/'deals.sqlite3'), timeout=15); c.row_factory=sqlite3.Row
     c.executescript('''CREATE TABLE IF NOT EXISTS config (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, published TEXT NOT NULL, summary TEXT NOT NULL, tags TEXT NOT NULL, meta TEXT NOT NULL, fetched TEXT NOT NULL, analysis TEXT);
-CREATE TABLE IF NOT EXISTS feedback (deal_id TEXT PRIMARY KEY REFERENCES deals(id), rating TEXT NOT NULL, note TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS feedback_events (id INTEGER PRIMARY KEY, deal_id TEXT REFERENCES deals(id), rating TEXT NOT NULL, note TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, at TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL);
-'''); return c
+''')
+    if not c.execute("SELECT 1 FROM migrations WHERE name='multi-category-v2'").fetchone():
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='feedback'").fetchone():
+            c.execute('INSERT INTO feedback_events(deal_id,rating,note,at) SELECT deal_id,rating,note,at FROM feedback')
+        # Legacy results have one category and no task duration; preserve source data for reanalysis.
+        c.execute('UPDATE deals SET analysis=NULL WHERE analysis IS NOT NULL')
+        c.execute("INSERT INTO migrations(name) VALUES ('multi-category-v2')")
+        c.commit()
+    return c
 
 def now(): return datetime.now(timezone.utc)
 def iso(): return now().isoformat()
@@ -49,10 +58,12 @@ def config(c):
     return json.loads(r['value'])
 
 def setup(c,a):
-    cats=[x.strip() for x in a.categories.split(',') if x.strip()]
+    cats=list(dict.fromkeys(x.strip() for x in a.categories.split(',') if x.strip()))
     if not cats or any(x not in CATEGORIES for x in cats): raise ValueError('Choose valid categories: '+', '.join(CATEGORIES))
-    if not 0 <= a.minimum <= a.global_minimum <= 10000000: raise ValueError('Require 0 <= minimum <= global minimum')
-    profile={'categories':cats,'minimum_aud':a.minimum,'global_minimum_aud':a.global_minimum,'notes':a.notes[:2000]}
+    if not 0 <= a.minimum <= 10000000: raise ValueError('Invalid minimum')
+    if a.global_minimum is not None and not a.minimum <= a.global_minimum <= 10000000: raise ValueError('Cross-category minimum must be at least the minimum')
+    if a.max_days is not None and not 0 <= a.max_days <= 36500: raise ValueError('Invalid task duration')
+    profile={'version':2,'categories':cats,'minimum_aud':a.minimum,'global_minimum_aud':a.global_minimum,'max_task_days':a.max_days,'notes':a.notes}
     c.execute('INSERT OR REPLACE INTO config(id,value) VALUES (1,?)',(json.dumps(profile,ensure_ascii=False),)); c.commit(); emit(profile)
 
 def collect(c,a):
@@ -99,18 +110,21 @@ def analyse(c,a):
     if not isinstance(entries,list): raise ValueError('Expected JSON array')
     changed=0
     for x in entries:
-        id=str(x.get('id','')); cat=x.get('category'); value=x.get('benefit_aud'); status=x.get('status'); evidence=x.get('evidence','')
-        if not re.fullmatch(r'\d+',id) or cat not in CATEGORIES or status not in ('known','unknown','irrelevant'): raise ValueError('Invalid id, category or status')
+        id=str(x.get('id','')); cats=x.get('categories'); value=x.get('benefit_aud'); status=x.get('status'); evidence=x.get('evidence',''); days=x.get('task_days')
+        if not re.fullmatch(r'\d+',id) or not isinstance(cats,list) or not cats or any(t not in CATEGORIES for t in cats) or status not in ('known','unknown','irrelevant'): raise ValueError('Invalid id, categories or status')
         if status=='known':
             if isinstance(value,bool) or not isinstance(value,(int,float)) or not 0<=value<=10000000 or not str(evidence).strip(): raise ValueError('Known benefit requires a non-negative amount and evidence')
         elif value is not None: raise ValueError('Unknown or irrelevant benefits must be null')
-        result={'category':cat,'status':status,'benefit_aud':value,'benefit_note':str(x.get('benefit_note',''))[:500],'conditions':str(x.get('conditions',''))[:1000],'evidence':str(evidence)[:800]}
+        if days is not None and (isinstance(days,bool) or not isinstance(days,(int,float)) or not 0<=days<=36500): raise ValueError('Invalid task_days')
+        result={'categories':list(dict.fromkeys(cats)),'status':status,'benefit_aud':value,'benefit_note':str(x.get('benefit_note','')),'task_days':days,'task_note':str(x.get('task_note','')),'payout_note':str(x.get('payout_note','')),'conditions':str(x.get('conditions','')),'evidence':str(evidence)}
         cur=c.execute('UPDATE deals SET analysis=? WHERE id=?',(json.dumps(result,ensure_ascii=False),id)); changed+=cur.rowcount
         if not cur.rowcount: raise ValueError('Unknown deal id '+id)
     c.commit(); emit({'updated':changed})
 
 def report(c,a):
-    p=config(c); cutoff=(now()-timedelta(hours=a.hours)).isoformat()
+    p=config(c)
+    if p.get('version') != 2: raise ValueError('Your previous profile needs the new task-duration and category setup; run setup again.')
+    cutoff=(now()-timedelta(hours=a.hours)).isoformat()
     rows=c.execute('SELECT * FROM deals WHERE published >= ? AND analysis IS NOT NULL ORDER BY published DESC',(cutoff,)).fetchall(); matches=[]; uncertain=[]
     for r in rows:
         d=dict(r); x=json.loads(d.pop('analysis')); d.update(x); d.pop('tags'); meta=json.loads(d.pop('meta'))
@@ -120,21 +134,34 @@ def report(c,a):
                 if datetime.fromisoformat(expiry).timestamp() < now().timestamp(): continue
             except ValueError: pass
         if x['status']=='irrelevant': continue
-        if x['status']=='unknown':
-            if x['category'] in p['categories']: uncertain.append(d)
-        elif x['benefit_aud']>=p['minimum_aud'] and (x['category'] in p['categories'] or x['benefit_aud']>=p['global_minimum_aud']): matches.append(d)
-    emit({'profile':p,'matches':matches,'needs_review':uncertain,'note':'Unknown amounts are not qualifying matches. Validate current conditions before acting.'})
+        selected=bool(set(x['categories']) & set(p['categories']))
+        cross=p['global_minimum_aud']
+        if not selected and cross is None: continue
+        threshold=p['minimum_aud'] if selected else cross
+        if x['benefit_aud'] is not None and x['benefit_aud'] < threshold: continue
+        if p['max_task_days'] is not None and x['task_days'] is not None and x['task_days'] > p['max_task_days']: continue
+        reasons=[]
+        if x['status']=='unknown': reasons.append('benefit unknown')
+        if p['max_task_days'] is not None and x['task_days'] is None: reasons.append('task duration unknown')
+        if reasons: d['uncertain_reasons']=reasons; uncertain.append(d)
+        else: matches.append(d)
+    emit({'profile':p,'matches':matches,'needs_review':uncertain,'note':'Unknown benefits or task durations are not qualifying matches. Validate conditions before acting.'})
 
 def feedback(c,a):
-    if not c.execute('SELECT 1 FROM deals WHERE id=?',(a.id,)).fetchone(): raise ValueError('Unknown deal id')
-    c.execute('INSERT OR REPLACE INTO feedback VALUES(?,?,?,?)',(a.id,a.rating,a.note[:2000],iso())); c.commit(); emit({'saved':True})
+    if a.id != 'general' and not c.execute('SELECT 1 FROM deals WHERE id=?',(a.id,)).fetchone(): raise ValueError('Unknown deal id')
+    if not a.note.strip() and a.id == 'general': raise ValueError('General feedback requires a note')
+    c.execute('INSERT INTO feedback_events(deal_id,rating,note,at) VALUES(?,?,?,?)',(None if a.id=='general' else a.id,a.rating,a.note,iso())); c.commit(); emit({'saved':True})
 
 def status(c,a):
-    emit({'profile':config(c) if c.execute('SELECT 1 FROM config').fetchone() else None,'total':c.execute('SELECT count(*) FROM deals').fetchone()[0],'pending':c.execute('SELECT count(*) FROM deals WHERE analysis IS NULL').fetchone()[0],'runs':[dict(r) for r in c.execute('SELECT at,status,detail FROM runs ORDER BY id DESC LIMIT 10')],'feedback':[dict(r) for r in c.execute('SELECT f.*,d.title FROM feedback f JOIN deals d ON d.id=f.deal_id ORDER BY f.at DESC LIMIT 30')]})
+    emit({'profile':config(c) if c.execute('SELECT 1 FROM config').fetchone() else None,'total':c.execute('SELECT count(*) FROM deals').fetchone()[0],'pending':c.execute('SELECT count(*) FROM deals WHERE analysis IS NULL').fetchone()[0],'runs':[dict(r) for r in c.execute('SELECT at,status,detail FROM runs ORDER BY id DESC LIMIT 10')],'feedback_count':c.execute('SELECT count(*) FROM feedback_events').fetchone()[0],'feedback':[dict(r) for r in c.execute('SELECT f.*,d.title FROM feedback_events f LEFT JOIN deals d ON d.id=f.deal_id ORDER BY f.id DESC LIMIT 100')]})
+
+def feedback_history(c,a):
+    rows=c.execute('SELECT f.*,d.title FROM feedback_events f LEFT JOIN deals d ON d.id=f.deal_id ORDER BY f.id DESC LIMIT ? OFFSET ?', (a.limit,a.offset)).fetchall()
+    emit([dict(r) for r in rows])
 
 def main():
     p=argparse.ArgumentParser(description=__doc__); sub=p.add_subparsers(dest='command',required=True)
-    x=sub.add_parser('setup'); x.add_argument('--categories',required=True); x.add_argument('--minimum',type=float,required=True); x.add_argument('--global-minimum',type=float,required=True); x.add_argument('--notes',default=''); x.set_defaults(fn=setup)
+    x=sub.add_parser('setup'); x.add_argument('--categories',required=True); x.add_argument('--minimum',type=float,required=True); x.add_argument('--global-minimum',type=float,default=None,help='Omit to disable cross-category exceptions'); x.add_argument('--max-days',type=float,default=None,help='Maximum task duration in days; omit for no limit'); x.add_argument('--notes',default=''); x.set_defaults(fn=setup)
     x=sub.add_parser('collect'); x.set_defaults(fn=collect)
     x=sub.add_parser('watch'); x.add_argument('--minutes',type=int,default=15); x.set_defaults(fn=watch)
     x=sub.add_parser('pending'); x.add_argument('--limit',type=int,default=100); x.set_defaults(fn=pending)
@@ -143,6 +170,7 @@ def main():
     x=sub.add_parser('report'); x.add_argument('--hours',type=int,default=24); x.set_defaults(fn=report)
     x=sub.add_parser('feedback'); x.add_argument('id'); x.add_argument('rating',choices=['useful','irrelevant','wrong']); x.add_argument('--note',default=''); x.set_defaults(fn=feedback)
     x=sub.add_parser('status'); x.set_defaults(fn=status)
+    x=sub.add_parser('feedback-history'); x.add_argument('--limit',type=int,default=100); x.add_argument('--offset',type=int,default=0); x.set_defaults(fn=feedback_history)
     args=p.parse_args()
     try:
         with connect() as c: args.fn(c,args)
