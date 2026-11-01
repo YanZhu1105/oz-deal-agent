@@ -1,10 +1,10 @@
 # Oz Deal Agent
 
-Find Australian deals that fit your interests, minimum benefit and preferred time commitment. Oz Deal Agent is an open-source skill for Codex that monitors OzBargain, checks potential matches against the merchant's current terms, and lets you refine recommendations through conversation.
+Find Australian deals that fit your interests, minimum benefit and preferred time commitment. Oz Deal Agent is an open-source skill for Codex and Claude Code that monitors OzBargain, checks potential matches against the merchant's current terms, and lets you refine recommendations through conversation.
 
-[中文说明](README.zh-CN.md) · [Report a bug or request a feature](https://github.com/YanZhu1105/oz-deal-agent/issues/new/choose) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+[中文说明](README.zh-CN.md) · [Report a bug or request a feature](https://github.com/YanZhu1105/oz-deal-agent/issues/new/choose) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Disclaimer](DISCLAIMER.md)
 
-> **Early prototype:** Use it in a local Codex session first. Automatic collection, scheduled AI runs and notifications require separate setup and a host that supports them. The project does not provide a hosted service, email or Telegram delivery. A deal, its eligibility and its terms can change: check the linked offer before acting. This project is independent and is not affiliated with OzBargain.
+> **Early prototype:** Use it in a local Codex session first. Onboarding can set up automatic collection and scheduled AI digests where your host supports them. A macOS collector installer is included; availability of host schedules and notifications varies. The project does not provide a hosted service, email or Telegram delivery. A deal, its eligibility and its terms can change: check the linked offer before acting. This project is independent and is not affiliated with OzBargain.
 
 ## What it does
 
@@ -20,7 +20,7 @@ The collector uses Python's standard library and makes no model API calls. Your 
 
 ### Requirements
 
-- Codex with local skills, file and network access. Availability and usage limits depend on your account and platform.
+- Codex or Claude Code with local skills, file and network access. Availability and usage limits depend on your account and platform.
 - Git and Python **3.9 or newer**. On Windows, Python may need the IANA time zone database: `python -m pip install tzdata`. The project has not yet been tested on Windows.
 - A computer that can reach OzBargain and the relevant merchant websites.
 
@@ -33,9 +33,9 @@ The collector uses Python's standard library and makes no model API calls. Your 
    cd oz-deal-agent
    ```
 
-2. Open this folder as a Codex project. Codex discovers the project skill in `.agents/skills/oz-deal-agent`. If it does not appear, restart Codex or select the project again. You do not need to install a separate AI API key.
+2. Open this folder as a project. Codex discovers `.agents/skills/oz-deal-agent`; Claude Code discovers `.claude/skills/oz-deal-agent`. If the skill does not appear, restart the host or select the project again. You do not need to install a separate AI API key for this project.
 
-3. In Codex, ask:
+3. In Codex, ask (in Claude Code, use `/oz-deal-agent`):
 
    > Use `$oz-deal-agent` to set up my deal preferences and find my first deals.
 
@@ -43,19 +43,30 @@ The collector uses Python's standard library and makes no model API calls. Your 
 
 4. Tell the agent what was useful, irrelevant or wrong. Feedback is appended locally and can inform later recommendations. You can ask to change your categories or thresholds at any time.
 
-The skill uses the [Agent Skills](https://agentskills.io/) folder format; compatibility with other hosts, including Claude Code, has **not** been tested. Downloading the repository does not automatically configure an AI host, install a scheduler or send notifications.
+The skill uses the [Agent Skills](https://agentskills.io/) format. Claude Code project discovery follows its documented layout but has not yet been verified end-to-end in this project. For Grok Bot, see the [experimental prompt adapter](adapters/grok-bot/README.md): its cloud routines do not automatically share the local database. Downloading alone does not create a schedule.
 
 ## Scheduling and notifications
 
-Selecting a frequency saves a preference; it **does not** turn on a schedule. If your Codex host supports scheduled tasks, ask it to schedule the digest in your existing chat at your chosen time. Check the scheduled task was actually created and your account has enough usage. Local jobs need the computer on; local Codex scheduled tasks may also require the app to remain running.
+After onboarding, the agent should set up **both** an RSS collector and an AI digest schedule at your chosen frequency, time and timezone when the host supports them, and report which steps succeeded. It should not claim automatic push is enabled until the actual scheduled task exists. AI runs consume your host's usage allowance. The macOS collector itself does not call AI.
 
-New-deal RSS is a rolling snapshot. Fetching it only once a day can miss entries, so collection should run more frequently than the digest. To collect every 15 minutes while a terminal process remains open:
+For Codex Desktop, the agent can use its scheduled-task capability if available. Claude Desktop supports persistent local scheduled tasks, while Claude Code `/loop` is session-scoped; a cloud task cannot access your local SQLite database. Grok Bot uses cloud routines and needs a separately verified durable private store. See [Claude scheduling](https://code.claude.com/docs/en/scheduled-tasks) and [Grok routines](https://docs.x.ai/grok-bot/skills-routines-and-automations).
+
+### macOS RSS collector
+
+The agent can install and check the per-user collector, which runs every 15 minutes:
 
 ```bash
-python3 .agents/skills/oz-deal-agent/scripts/agent.py watch
+python3 .agents/skills/oz-deal-agent/scripts/schedule_collector.py install
+python3 .agents/skills/oz-deal-agent/scripts/schedule_collector.py status
 ```
 
-On Windows use `python` if `python3` is unavailable. Alternatively, configure your operating system's scheduler to run the `collect` command. This collector uses no AI, and it does not send a digest. Stop the terminal process with `Ctrl+C`. When the computer sleeps, stops, loses network access or is rate-limited, deals can be missed.
+The installer creates a launchd job and copies the collector into your local state directory. Run `agent.py status` and check the collector logs to confirm a successful fetch; a loaded job alone is not proof. Re-run `install` after updating the project to refresh the collector. To stop and remove the job while preserving your data:
+
+```bash
+python3 .agents/skills/oz-deal-agent/scripts/schedule_collector.py uninstall
+```
+
+The collector requires your Mac to be on and a logged-in user session. It can miss posts during sleep, outages or rate limits. The scheduler installer currently supports macOS only. On other systems, use a local scheduler for `collect`, or run `python3 .agents/skills/oz-deal-agent/scripts/agent.py watch` in a terminal for collection every 15 minutes while it remains open. These commands collect only; they do not send an AI digest. Re-run the installer when you change `OZ_DEAL_DATA` for a different user.
 
 ## How matching works
 
@@ -86,6 +97,6 @@ python3 .agents/skills/oz-deal-agent/scripts/agent.py --help
 
 `collect`, `watch`, `bootstrap` and `post` make network requests. Use a separate `OZ_DEAL_DATA` when testing. See [CONTRIBUTING.md](CONTRIBUTING.md) for changes and [SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
-## License
+## Disclaimer and license
 
-[MIT](LICENSE).
+Results are based on public online information and can be wrong or outdated. The author and contributors disclaim liability for losses to the fullest extent permitted by law; independently verify each offer. See the full [disclaimer](DISCLAIMER.md). Software: [MIT](LICENSE).

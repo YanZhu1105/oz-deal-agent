@@ -67,7 +67,12 @@ def setup(c,a):
     if a.global_minimum is not None and not a.minimum <= a.global_minimum <= 10000000: raise ValueError('Cross-category minimum must be at least the minimum')
     if a.max_days is not None and not 0 <= a.max_days <= 36500: raise ValueError('Invalid task duration')
     if not 1 <= a.frequency_days <= 365: raise ValueError('Frequency must be between 1 and 365 days')
-    profile={'version':2,'categories':cats,'minimum_aud':a.minimum,'global_minimum_aud':a.global_minimum,'max_task_days':a.max_days,'frequency_days':a.frequency_days,'notes':a.notes}
+    delivery_time=getattr(a,'delivery_time',None); time_zone=getattr(a,'timezone',None)
+    if bool(delivery_time) != bool(time_zone): raise ValueError('Provide both delivery time and timezone')
+    if delivery_time:
+        if not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]',delivery_time): raise ValueError('Time must use 24-hour HH:MM')
+        ZoneInfo(time_zone)
+    profile={'version':2,'categories':cats,'minimum_aud':a.minimum,'global_minimum_aud':a.global_minimum,'max_task_days':a.max_days,'frequency_days':a.frequency_days,'delivery_time':delivery_time,'timezone':time_zone,'notes':a.notes}
     c.execute('INSERT OR REPLACE INTO config(id,value) VALUES (1,?)',(json.dumps(profile,ensure_ascii=False),)); c.commit(); emit(profile)
 
 def collect(c,a):
@@ -234,7 +239,7 @@ def feedback_history(c,a):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__); sub=p.add_subparsers(dest='command',required=True)
-    x=sub.add_parser('setup'); x.add_argument('--categories',required=True); x.add_argument('--minimum',type=float,required=True); x.add_argument('--global-minimum',type=float,default=None,help='Omit to disable cross-category exceptions'); x.add_argument('--max-days',type=float,default=None,help='Maximum task duration in days; omit for no limit'); x.add_argument('--frequency-days',type=int,required=True,help='Digest interval in days'); x.add_argument('--notes',default=''); x.set_defaults(fn=setup)
+    x=sub.add_parser('setup'); x.add_argument('--categories',required=True); x.add_argument('--minimum',type=float,required=True); x.add_argument('--global-minimum',type=float,default=None,help='Omit to disable cross-category exceptions'); x.add_argument('--max-days',type=float,default=None,help='Maximum task duration in days; omit for no limit'); x.add_argument('--frequency-days',type=int,required=True,help='Digest interval in days'); x.add_argument('--delivery-time',help='Local digest time in HH:MM'); x.add_argument('--timezone',help='IANA time zone for digest'); x.add_argument('--notes',default=''); x.set_defaults(fn=setup)
     x=sub.add_parser('collect'); x.set_defaults(fn=collect)
     x=sub.add_parser('bootstrap'); x.add_argument('--pages',type=int,default=10); x.add_argument('--delay',type=float,default=2); x.set_defaults(fn=bootstrap)
     x=sub.add_parser('watch'); x.add_argument('--minutes',type=int,default=15); x.set_defaults(fn=watch)

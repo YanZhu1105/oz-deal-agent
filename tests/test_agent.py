@@ -40,6 +40,17 @@ class AgentTests(unittest.TestCase):
                            agent.iso(), '', '[]', '{}', agent.iso(), json.dumps(analysis)))
         self.conn.commit()
 
+    def test_schedule_time_and_timezone_are_saved_together(self):
+        profile = self.call(agent.setup, categories='Cashback', minimum=100,
+                            global_minimum=300, max_days=90, frequency_days=3,
+                            delivery_time='09:00', timezone='Australia/Melbourne', notes='')
+        self.assertEqual((profile['frequency_days'], profile['delivery_time'], profile['timezone']),
+                         (3, '09:00', 'Australia/Melbourne'))
+        with self.assertRaises(ValueError):
+            self.call(agent.setup, categories='Cashback', minimum=100,
+                      global_minimum=300, max_days=90, frequency_days=3,
+                      delivery_time='25:00', timezone='Australia/Melbourne', notes='')
+
     def test_threshold_duration_override_and_verification(self):
         self.deal('1', 150, 90, ['Cashback', 'Mobile & internet'])
         self.deal('2', 299, 91, ['Cashback'])
