@@ -10,7 +10,7 @@ Find Australian deals that fit your interests, minimum benefit and preferred tim
 
 - Asks five setup questions: interests, minimum AUD benefit, maximum time to complete the requirements, an optional high-value override and digest frequency.
 - Covers 17 selectable topics, from banking, credit cards and cashback to groceries, travel and technology. Deals can belong to multiple topics.
-- Screens RSS titles and summaries first, then checks promising OzBargain posts and official merchant terms. Credit-card recommendations should explain fees, eligibility, previous-card exclusions, spending windows, payout, interest-free repayment and automatic-payment options where verified.
+- Screens RSS titles and summaries first, then checks promising OzBargain posts and official merchant terms. For every offer, summarises verified reward and costs, claim steps, eligible and excluded customers, deadlines and payout. Credit-card details also cover prior-card exclusions, interest-free repayment and automatic-payment options where verified.
 - Keeps preferences, feedback, collected deals and delivered IDs in a local SQLite database. Previously delivered IDs are excluded from later reports.
 - On the first run, can backfill the site's publicly paginated list of deals marked active, then continue collecting new RSS entries.
 
