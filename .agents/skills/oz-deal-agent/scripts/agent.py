@@ -37,6 +37,7 @@ def connect():
     c.executescript('''CREATE TABLE IF NOT EXISTS config (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS deals (id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, published TEXT NOT NULL, summary TEXT NOT NULL, tags TEXT NOT NULL, meta TEXT NOT NULL, fetched TEXT NOT NULL, analysis TEXT);
 CREATE TABLE IF NOT EXISTS feedback_events (id INTEGER PRIMARY KEY, deal_id TEXT REFERENCES deals(id), rating TEXT NOT NULL, note TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS deliveries (deal_id TEXT PRIMARY KEY REFERENCES deals(id), delivered_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, at TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL);
 ''')
@@ -63,7 +64,8 @@ def setup(c,a):
     if not 0 <= a.minimum <= 10000000: raise ValueError('Invalid minimum')
     if a.global_minimum is not None and not a.minimum <= a.global_minimum <= 10000000: raise ValueError('Cross-category minimum must be at least the minimum')
     if a.max_days is not None and not 0 <= a.max_days <= 36500: raise ValueError('Invalid task duration')
-    profile={'version':2,'categories':cats,'minimum_aud':a.minimum,'global_minimum_aud':a.global_minimum,'max_task_days':a.max_days,'notes':a.notes}
+    if not 1 <= a.frequency_days <= 365: raise ValueError('Frequency must be between 1 and 365 days')
+    profile={'version':2,'categories':cats,'minimum_aud':a.minimum,'global_minimum_aud':a.global_minimum,'max_task_days':a.max_days,'frequency_days':a.frequency_days,'notes':a.notes}
     c.execute('INSERT OR REPLACE INTO config(id,value) VALUES (1,?)',(json.dumps(profile,ensure_ascii=False),)); c.commit(); emit(profile)
 
 def collect(c,a):
@@ -124,8 +126,12 @@ def analyse(c,a):
 def report(c,a):
     p=config(c)
     if p.get('version') != 2: raise ValueError('Your previous profile needs the new task-duration and category setup; run setup again.')
-    cutoff=(now()-timedelta(hours=a.hours)).isoformat()
-    rows=c.execute('SELECT * FROM deals WHERE published >= ? AND analysis IS NOT NULL ORDER BY published DESC',(cutoff,)).fetchall(); matches=[]; uncertain=[]
+    query='SELECT d.* FROM deals d LEFT JOIN deliveries sent ON sent.deal_id=d.id WHERE d.analysis IS NOT NULL AND sent.deal_id IS NULL'
+    args=[]
+    if a.hours is not None:
+        if a.hours < 1: raise ValueError('hours must be positive')
+        query+=' AND d.published >= ?'; args.append((now()-timedelta(hours=a.hours)).isoformat())
+    rows=c.execute(query+' ORDER BY d.published DESC',args).fetchall(); matches=[]; uncertain=[]
     for r in rows:
         d=dict(r); x=json.loads(d.pop('analysis')); d.update(x); d.pop('tags'); meta=json.loads(d.pop('meta'))
         expiry=meta.get('expiry')
@@ -147,13 +153,20 @@ def report(c,a):
         else: matches.append(d)
     emit({'profile':p,'matches':matches,'needs_review':uncertain,'note':'Unknown benefits or task durations are not qualifying matches. Validate conditions before acting.'})
 
+def mark_delivered(c,a):
+    ids=list(dict.fromkeys(a.ids))
+    for id in ids:
+        if not re.fullmatch(r'\d+',id) or not c.execute('SELECT 1 FROM deals WHERE id=?',(id,)).fetchone(): raise ValueError('Unknown deal id: '+id)
+    c.executemany('INSERT OR IGNORE INTO deliveries(deal_id,delivered_at) VALUES (?,?)',[(id,iso()) for id in ids]); c.commit()
+    emit({'recorded':ids})
+
 def feedback(c,a):
     if a.id != 'general' and not c.execute('SELECT 1 FROM deals WHERE id=?',(a.id,)).fetchone(): raise ValueError('Unknown deal id')
     if not a.note.strip() and a.id == 'general': raise ValueError('General feedback requires a note')
     c.execute('INSERT INTO feedback_events(deal_id,rating,note,at) VALUES(?,?,?,?)',(None if a.id=='general' else a.id,a.rating,a.note,iso())); c.commit(); emit({'saved':True})
 
 def status(c,a):
-    emit({'profile':config(c) if c.execute('SELECT 1 FROM config').fetchone() else None,'total':c.execute('SELECT count(*) FROM deals').fetchone()[0],'pending':c.execute('SELECT count(*) FROM deals WHERE analysis IS NULL').fetchone()[0],'runs':[dict(r) for r in c.execute('SELECT at,status,detail FROM runs ORDER BY id DESC LIMIT 10')],'feedback_count':c.execute('SELECT count(*) FROM feedback_events').fetchone()[0],'feedback':[dict(r) for r in c.execute('SELECT f.*,d.title FROM feedback_events f LEFT JOIN deals d ON d.id=f.deal_id ORDER BY f.id DESC LIMIT 100')]})
+    emit({'profile':config(c) if c.execute('SELECT 1 FROM config').fetchone() else None,'total':c.execute('SELECT count(*) FROM deals').fetchone()[0],'pending':c.execute('SELECT count(*) FROM deals WHERE analysis IS NULL').fetchone()[0],'delivered':c.execute('SELECT count(*) FROM deliveries').fetchone()[0],'runs':[dict(r) for r in c.execute('SELECT at,status,detail FROM runs ORDER BY id DESC LIMIT 10')],'feedback_count':c.execute('SELECT count(*) FROM feedback_events').fetchone()[0],'feedback':[dict(r) for r in c.execute('SELECT f.*,d.title FROM feedback_events f LEFT JOIN deals d ON d.id=f.deal_id ORDER BY f.id DESC LIMIT 100')]})
 
 def feedback_history(c,a):
     rows=c.execute('SELECT f.*,d.title FROM feedback_events f LEFT JOIN deals d ON d.id=f.deal_id ORDER BY f.id DESC LIMIT ? OFFSET ?', (a.limit,a.offset)).fetchall()
@@ -161,13 +174,14 @@ def feedback_history(c,a):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__); sub=p.add_subparsers(dest='command',required=True)
-    x=sub.add_parser('setup'); x.add_argument('--categories',required=True); x.add_argument('--minimum',type=float,required=True); x.add_argument('--global-minimum',type=float,default=None,help='Omit to disable cross-category exceptions'); x.add_argument('--max-days',type=float,default=None,help='Maximum task duration in days; omit for no limit'); x.add_argument('--notes',default=''); x.set_defaults(fn=setup)
+    x=sub.add_parser('setup'); x.add_argument('--categories',required=True); x.add_argument('--minimum',type=float,required=True); x.add_argument('--global-minimum',type=float,default=None,help='Omit to disable cross-category exceptions'); x.add_argument('--max-days',type=float,default=None,help='Maximum task duration in days; omit for no limit'); x.add_argument('--frequency-days',type=int,required=True,help='Digest interval in days'); x.add_argument('--notes',default=''); x.set_defaults(fn=setup)
     x=sub.add_parser('collect'); x.set_defaults(fn=collect)
     x=sub.add_parser('watch'); x.add_argument('--minutes',type=int,default=15); x.set_defaults(fn=watch)
     x=sub.add_parser('pending'); x.add_argument('--limit',type=int,default=100); x.set_defaults(fn=pending)
     x=sub.add_parser('post'); x.add_argument('id'); x.set_defaults(fn=post)
     x=sub.add_parser('analyse'); x.set_defaults(fn=analyse)
-    x=sub.add_parser('report'); x.add_argument('--hours',type=int,default=24); x.set_defaults(fn=report)
+    x=sub.add_parser('report'); x.add_argument('--hours',type=int,default=None,help='Optional age limit; default is all collected, not-yet-delivered deals'); x.set_defaults(fn=report)
+    x=sub.add_parser('mark-delivered'); x.add_argument('ids',nargs='+'); x.set_defaults(fn=mark_delivered)
     x=sub.add_parser('feedback'); x.add_argument('id'); x.add_argument('rating',choices=['useful','irrelevant','wrong']); x.add_argument('--note',default=''); x.set_defaults(fn=feedback)
     x=sub.add_parser('status'); x.set_defaults(fn=status)
     x=sub.add_parser('feedback-history'); x.add_argument('--limit',type=int,default=100); x.add_argument('--offset',type=int,default=0); x.set_defaults(fn=feedback_history)
