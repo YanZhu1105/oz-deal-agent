@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 DATA = Path(os.environ.get('OZ_DEAL_DATA', str(Path.home() / '.local/share/oz-deal-agent'))).expanduser()
 FEED = 'https://www.ozbargain.com.au/deals/feed'
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS feedback_events (id INTEGER PRIMARY KEY, deal_id TEXT
 CREATE TABLE IF NOT EXISTS deliveries (deal_id TEXT PRIMARY KEY REFERENCES deals(id), delivered_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, at TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bootstrap_state (id INTEGER PRIMARY KEY CHECK(id=1), next_page INTEGER NOT NULL, total_added INTEGER NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL, updated_at TEXT NOT NULL);
 ''')
     if not c.execute("SELECT 1 FROM migrations WHERE name='multi-category-v2'").fetchone():
         if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='feedback'").fetchone():
@@ -84,6 +86,56 @@ def collect(c,a):
         c.execute('INSERT INTO runs(at,status,detail) VALUES (?,?,?)',(iso(),'ok','%d items; %d added'%(len(items),added))); c.commit(); emit({'items':len(items),'added':added,'oldest_in_feed':items[-1].findtext('pubDate'),'note':'A single RSS snapshot cannot establish complete coverage.'})
     except Exception as e:
         c.rollback(); c.execute('INSERT INTO runs(at,status,detail) VALUES (?,?,?)',(iso(),'error',str(e)[:500])); c.commit(); raise
+
+class DealList(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.depth=0; self.current=None; self.section=None; self.section_depth=0; self.items=[]
+    def handle_starttag(self,tag,attrs):
+        attrs=dict(attrs); classes=attrs.get('class','').split()
+        if self.current is None and tag=='div' and 'node-ozbdeal' in classes and re.fullmatch(r'node\d+',attrs.get('id','')):
+            self.current={'id':attrs['id'][4:],'title':'','submitted':[],'summary':[],'tags':[],'expired':False}; self.depth=1; return
+        if self.current is None: return
+        self.depth+=1
+        if 'expired' in classes: self.current['expired']=True
+        if tag=='h2' and attrs.get('id')=='title'+self.current['id']: self.current['title']=attrs.get('data-title','')
+        if tag=='div' and ('submitted' in classes or 'content' in classes): self.section='submitted' if 'submitted' in classes else 'summary'; self.section_depth=self.depth
+        if tag=='a' and attrs.get('href','').startswith('/cat/'):
+            self.current['tags'].append({'name':attrs['href'].split('/')[-1],'domain':'https://www.ozbargain.com.au'+attrs['href']})
+    def handle_data(self,data):
+        if self.current is not None and self.section: self.current[self.section].append(data)
+    def handle_endtag(self,tag):
+        if self.current is None: return
+        if self.section and self.depth==self.section_depth: self.section=None
+        self.depth-=1
+        if self.depth==0:
+            self.items.append(self.current); self.current=None
+
+def bootstrap(c,a):
+    if not 1<=a.pages<=100 or a.delay<2: raise ValueError('Use 1–100 pages and a delay of at least 2 seconds')
+    st=c.execute('SELECT * FROM bootstrap_state WHERE id=1').fetchone()
+    if st and st['status']=='boundary':
+        emit(dict(st)); return
+    page=st['next_page'] if st else 0; added=st['total_added'] if st else 0; start=page
+    for _ in range(a.pages):
+        try:
+            if page>start: time.sleep(a.delay)
+            body=fetch('https://www.ozbargain.com.au/deals?noexpired=1&page='+str(page)).decode('utf-8','replace')
+            parser=DealList(); parser.feed(body)
+            if not parser.items: raise ValueError('No deal entries found; page format may have changed')
+            for item in parser.items:
+                if item['expired'] or not item['title']: continue
+                submitted=' '.join(item['submitted']); match=re.search(r'on\s+(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}:\d{2})',submitted)
+                if not match: continue
+                published=datetime.strptime(' '.join(match.groups()),'%d/%m/%Y %H:%M').replace(tzinfo=ZoneInfo('Australia/Sydney')).astimezone(timezone.utc).isoformat()
+                cur=c.execute('INSERT OR IGNORE INTO deals(id,title,url,published,summary,tags,meta,fetched) VALUES(?,?,?,?,?,?,?,?)',(item['id'],item['title'],'https://www.ozbargain.com.au/node/'+item['id'],published,' '.join(item['summary']).strip(),json.dumps(item['tags']),json.dumps({'source':'active_list','state':'site_lists_as_active_unverified'}),iso()));added+=cur.rowcount
+            page+=1
+            c.execute('INSERT OR REPLACE INTO bootstrap_state VALUES(1,?,?,?,?,?)',(page,added,'in_progress','Listed as active by OzBargain; individual conditions require checking',iso()));c.commit()
+        except Exception as e:
+            c.rollback(); code=getattr(e,'code',None); state='boundary' if code==404 else 'error'
+            detail=('Public pagination returned 404; coverage is limited and cannot be called complete.' if state=='boundary' else str(e))
+            c.execute('INSERT OR REPLACE INTO bootstrap_state VALUES(1,?,?,?,?,?)',(page,added,state,detail,iso()));c.commit()
+            emit({'next_page':page,'added_total':added,'status':state,'detail':detail});return
+    emit({'next_page':page,'added_total':added,'status':'in_progress','detail':'More pages may remain; run bootstrap again. No guarantee of full coverage.'})
 
 def watch(c,a):
     if a.minutes < 15: raise ValueError('Minimum collection interval is 15 minutes')
@@ -168,7 +220,7 @@ def feedback(c,a):
     c.execute('INSERT INTO feedback_events(deal_id,rating,note,at) VALUES(?,?,?,?)',(None if a.id=='general' else a.id,a.rating,a.note,iso())); c.commit(); emit({'saved':True})
 
 def status(c,a):
-    emit({'profile':config(c) if c.execute('SELECT 1 FROM config').fetchone() else None,'total':c.execute('SELECT count(*) FROM deals').fetchone()[0],'pending':c.execute('SELECT count(*) FROM deals WHERE analysis IS NULL').fetchone()[0],'delivered':c.execute('SELECT count(*) FROM deliveries').fetchone()[0],'runs':[dict(r) for r in c.execute('SELECT at,status,detail FROM runs ORDER BY id DESC LIMIT 10')],'feedback_count':c.execute('SELECT count(*) FROM feedback_events').fetchone()[0],'feedback':[dict(r) for r in c.execute('SELECT f.*,d.title FROM feedback_events f LEFT JOIN deals d ON d.id=f.deal_id ORDER BY f.id DESC LIMIT 100')]})
+    emit({'profile':config(c) if c.execute('SELECT 1 FROM config').fetchone() else None,'total':c.execute('SELECT count(*) FROM deals').fetchone()[0],'pending':c.execute('SELECT count(*) FROM deals WHERE analysis IS NULL').fetchone()[0],'delivered':c.execute('SELECT count(*) FROM deliveries').fetchone()[0],'runs':[dict(r) for r in c.execute('SELECT at,status,detail FROM runs ORDER BY id DESC LIMIT 10')],'bootstrap':dict(c.execute('SELECT * FROM bootstrap_state WHERE id=1').fetchone()) if c.execute('SELECT 1 FROM bootstrap_state WHERE id=1').fetchone() else None,'feedback_count':c.execute('SELECT count(*) FROM feedback_events').fetchone()[0],'feedback':[dict(r) for r in c.execute('SELECT f.*,d.title FROM feedback_events f LEFT JOIN deals d ON d.id=f.deal_id ORDER BY f.id DESC LIMIT 100')]})
 
 def feedback_history(c,a):
     rows=c.execute('SELECT f.*,d.title FROM feedback_events f LEFT JOIN deals d ON d.id=f.deal_id ORDER BY f.id DESC LIMIT ? OFFSET ?', (a.limit,a.offset)).fetchall()
@@ -178,6 +230,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__); sub=p.add_subparsers(dest='command',required=True)
     x=sub.add_parser('setup'); x.add_argument('--categories',required=True); x.add_argument('--minimum',type=float,required=True); x.add_argument('--global-minimum',type=float,default=None,help='Omit to disable cross-category exceptions'); x.add_argument('--max-days',type=float,default=None,help='Maximum task duration in days; omit for no limit'); x.add_argument('--frequency-days',type=int,required=True,help='Digest interval in days'); x.add_argument('--notes',default=''); x.set_defaults(fn=setup)
     x=sub.add_parser('collect'); x.set_defaults(fn=collect)
+    x=sub.add_parser('bootstrap'); x.add_argument('--pages',type=int,default=10); x.add_argument('--delay',type=float,default=2); x.set_defaults(fn=bootstrap)
     x=sub.add_parser('watch'); x.add_argument('--minutes',type=int,default=15); x.set_defaults(fn=watch)
     x=sub.add_parser('pending'); x.add_argument('--limit',type=int,default=100); x.set_defaults(fn=pending)
     x=sub.add_parser('post'); x.add_argument('id'); x.set_defaults(fn=post)
