@@ -145,10 +145,12 @@ def report(c,a):
         if not selected and cross is None: continue
         threshold=p['minimum_aud'] if selected else cross
         if x['benefit_aud'] is not None and x['benefit_aud'] < threshold: continue
-        if p['max_task_days'] is not None and x['task_days'] is not None and x['task_days'] > p['max_task_days']: continue
+        override = cross is not None and x['benefit_aud'] is not None and x['benefit_aud'] >= cross
+        if not override and p['max_task_days'] is not None and x['task_days'] is not None and x['task_days'] > p['max_task_days']: continue
         reasons=[]
         if x['status']=='unknown': reasons.append('benefit unknown')
-        if p['max_task_days'] is not None and x['task_days'] is None: reasons.append('task duration unknown')
+        if not override and p['max_task_days'] is not None and x['task_days'] is None: reasons.append('task duration unknown')
+        if override: d['high_value_override']=True
         if reasons: d['uncertain_reasons']=reasons; uncertain.append(d)
         else: matches.append(d)
     emit({'profile':p,'matches':matches,'needs_review':uncertain,'note':'Unknown benefits or task durations are not qualifying matches. Validate conditions before acting.'})

@@ -7,7 +7,7 @@ An open-source, local-first OzBargain deal companion for an existing AI agent su
 ## Use with Codex
 
 1. Download or clone this repository and open its folder as a Codex project. Python 3.9 or newer is required. The included skill is in `.agents/skills/oz-deal-agent`.
-2. Ask Codex: `Use $oz-deal-agent to set up my deal preferences.` Choose from all 17 interest categories, set the minimum AUD benefit, the maximum time to complete the offer requirements, whether a higher-benefit exception applies to other categories, and digest frequency (daily, every three days, weekly or another interval). Task duration and payout wait are recorded separately.
+2. Ask Codex: `Use $oz-deal-agent to set up my deal preferences.` Choose from all 17 interest categories, set the minimum AUD benefit, the maximum time to complete the offer requirements, whether a higher-benefit exception bypasses both category and task-duration limits, and digest frequency (daily, every three days, weekly or another interval). Task duration and payout wait are recorded separately.
 3. Ask for today's deals. The agent collects the feed, analyses candidates and presents a grouped digest with original links. Tell it which deals were useful, irrelevant or wrong, and why; general feedback can also be saved.
 4. If supported by your Codex account, ask it to schedule a run at the frequency you selected in the same chat. Ask separately about scheduling the RSS collector every 15 minutes. A local schedule needs your machine to be on; desktop AI jobs may also require the app running. Scheduling availability and usage limits depend on the platform and account. No guarantee is made about free-plan availability.
 
