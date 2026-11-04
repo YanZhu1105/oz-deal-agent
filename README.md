@@ -100,3 +100,5 @@ python3 .agents/skills/oz-deal-agent/scripts/agent.py --help
 ## Disclaimer and license
 
 Results are based on public online information and can be wrong or outdated. The author and contributors disclaim liability for losses to the fullest extent permitted by law; independently verify each offer. See the full [disclaimer](DISCLAIMER.md). Software: [MIT](LICENSE).
+
+Running `report` also appends verified matching deals to `~/.local/share/oz-deal-agent/qualifying-deals.csv`. Open it in Excel, Numbers or another spreadsheet app and edit the Status and Notes columns. Existing rows are preserved rather than overwritten; check current terms before acting, because saved rows do not update automatically.

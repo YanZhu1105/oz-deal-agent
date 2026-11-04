@@ -1,5 +1,6 @@
 """Tests of screening, delivery history and feedback; no network required."""
 import contextlib
+import csv
 import importlib.util
 import io
 import json
@@ -60,6 +61,27 @@ class AgentTests(unittest.TestCase):
         result = self.call(agent.report, hours=None)
         self.assertEqual({d['id'] for d in result['matches']}, {'1', '3'})
         self.assertEqual([d['id'] for d in result['needs_review']], ['4'])
+
+    def test_table_preserves_edits_and_excludes_unverified(self):
+        self.deal('1', 150, 0, ['Cashback'])
+        self.deal('2', 400, 0, ['Cashback'], 'unverified')
+        self.call(agent.report, hours=None)
+        path = agent.DATA / 'qualifying-deals.csv'
+        with path.open(encoding='utf-8-sig', newline='') as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual([row['Deal ID'] for row in rows], ['1'])
+        rows[0]['Status'] = 'Done'
+        rows[0]['Notes'] = 'Already applied'
+        with path.open('w', encoding='utf-8-sig', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=agent.TABLE_FIELDS)
+            writer.writeheader(); writer.writerows(rows)
+        self.call(agent.mark_delivered, ids=['1'])
+        self.call(agent.report, hours=None)
+        with path.open(encoding='utf-8-sig', newline='') as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['Status'], rows[0]['Notes']), ('Done', 'Already applied'))
+        self.assertEqual(agent.spreadsheet_text(' =unsafe'), "' =unsafe")
 
     def test_verified_offer_requires_source_and_evidence(self):
         self.deal('1', 150, 0, ['Cashback'], 'unverified')

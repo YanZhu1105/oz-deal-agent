@@ -48,3 +48,5 @@ Windows 若没有 `python3` 命令，可使用 `python`。macOS 也可使用 `py
 推荐基于网上公开信息，可能不准确或过期；作者和贡献者在适用法律允许的最大范围内不对相关损失承担责任。请自行核实官网条款。完整说明见[免责声明](DISCLAIMER.zh-CN.md)。项目采用 [MIT 许可](LICENSE)。
 
 Grok Bot 用户可参考[实验性适配说明](adapters/grok-bot/README.md)；云端 routine 无法自动读取本机数据库，持久状态与推送去重需要在平台上验证。
+
+运行 `report` 时，已核实且符合偏好的优惠也会追加到本地 `~/.local/share/oz-deal-agent/qualifying-deals.csv`。可以用 Excel、Numbers 等打开，在 Status 和 Notes 列填写处理状态与备注。已有行不会被覆盖；保存后的条款不会自动更新，办理前请重新核实。

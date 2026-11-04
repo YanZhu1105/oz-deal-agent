@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """OzBargain RSS collector and local state for an interactive AI agent."""
-import argparse, json, os, re, sqlite3, sys, time, urllib.request, xml.etree.ElementTree as ET
+import argparse, csv, fcntl, json, os, re, sqlite3, sys, time, urllib.request, xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -188,15 +188,12 @@ def analyse(c,a):
 def report(c,a):
     p=config(c)
     if p.get('version') != 2: raise ValueError('Your previous profile needs the new task-duration and category setup; run setup again.')
-    query='SELECT d.* FROM deals d LEFT JOIN deliveries sent ON sent.deal_id=d.id WHERE d.analysis IS NOT NULL AND sent.deal_id IS NULL'
-    args=[]
-    if a.hours is not None:
-        if a.hours < 1: raise ValueError('hours must be positive')
-        query+=' AND d.published >= ?'; args.append((now()-timedelta(hours=a.hours)).isoformat())
-    rows=c.execute(query+' ORDER BY d.published DESC',args).fetchall(); matches=[]; uncertain=[]
+    if a.hours is not None and a.hours < 1: raise ValueError('hours must be positive')
+    cutoff=(now()-timedelta(hours=a.hours)).isoformat() if a.hours is not None else None
+    rows=c.execute('SELECT d.*, sent.delivered_at FROM deals d LEFT JOIN deliveries sent ON sent.deal_id=d.id WHERE d.analysis IS NOT NULL ORDER BY d.published DESC').fetchall(); matches=[]; uncertain=[]; saved=[]
     for r in rows:
         d=dict(r); x=json.loads(d.pop('analysis')); d.update(x); d.pop('tags'); meta=json.loads(d.pop('meta'))
-        expiry=meta.get('expiry')
+        expiry=meta.get('expiry'); d['expiry']=expiry or ''
         if expiry:
             try:
                 if datetime.fromisoformat(expiry).timestamp() < now().timestamp(): continue
@@ -214,9 +211,48 @@ def report(c,a):
         if x['status']=='unknown': reasons.append('benefit unknown')
         if not override and p['max_task_days'] is not None and x['task_days'] is None: reasons.append('task duration unknown')
         if override: d['high_value_override']=True
+        if not reasons: saved.append(d)
+        if d.pop('delivered_at') is not None or (cutoff and d['published'] < cutoff): continue
         if reasons: d['uncertain_reasons']=reasons; uncertain.append(d)
         else: matches.append(d)
-    emit({'profile':p,'matches':matches,'needs_review':uncertain,'note':'Unverified offers and unknown benefits or task durations are not qualifying matches. Recheck current conditions before acting.'})
+    added=save_table(saved)
+    emit({'profile':p,'matches':matches,'needs_review':uncertain,'table':str(DATA/'qualifying-deals.csv'),'table_added':added,'note':'Unverified offers and unknown benefits or task durations are not qualifying matches. Recheck current conditions before acting.'})
+
+TABLE_FIELDS = ['Deal ID','Status','Notes','Title','Categories','Net benefit AUD','Benefit and fees','Requirements and exclusions','Task duration','Payout','Expiry','OzBargain URL','Official URL','Verified at','Evidence']
+
+def spreadsheet_text(value):
+    value = '' if value is None else str(value)
+    # Treat externally sourced content as text in spreadsheet applications.
+    return "'"+value if value.lstrip().startswith(('=', '+', '-', '@')) else value
+
+def save_table(deals):
+    """Append newly qualifying IDs; preserve the user's edits to existing rows."""
+    path=DATA/'qualifying-deals.csv'
+    DATA.mkdir(parents=True,exist_ok=True)
+    with (DATA/'qualifying-deals.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        exists=path.exists() and path.stat().st_size>0
+        ids=set()
+        if exists:
+            with path.open('r',encoding='utf-8-sig',newline='') as f:
+                reader=csv.DictReader(f)
+                if reader.fieldnames != TABLE_FIELDS: raise ValueError('Deal table columns changed; restore the header before adding new deals: '+str(path))
+                ids={row['Deal ID'] for row in reader}
+        added=0
+        with path.open('a',encoding='utf-8-sig',newline='') as f:
+            writer=csv.DictWriter(f,fieldnames=TABLE_FIELDS)
+            if not exists: writer.writeheader()
+            for d in deals:
+                if d['id'] in ids: continue
+                v=d.get('verification',{})
+                row={'Deal ID':d['id'],'Status':'To do','Notes':'','Title':d['title'],
+                     'Categories':', '.join(d['categories']),'Net benefit AUD':d.get('benefit_aud'),
+                     'Benefit and fees':d.get('benefit_note',''),'Requirements and exclusions':d.get('conditions',''),
+                     'Task duration':d.get('task_note',''),'Payout':d.get('payout_note',''),
+                     'Expiry':d.get('expiry',''),'OzBargain URL':d['url'],'Official URL':v.get('official_url',''),
+                     'Verified at':v.get('checked_at',''),'Evidence':v.get('evidence','')}
+                writer.writerow({k:spreadsheet_text(row[k]) for k in TABLE_FIELDS}); ids.add(d['id']); added+=1
+        return added
 
 def mark_delivered(c,a):
     ids=list(dict.fromkeys(a.ids))
